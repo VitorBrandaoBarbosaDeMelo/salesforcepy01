@@ -1,0 +1,7 @@
+request_id,auto_approve,notes
+REQ-001,true,Vendedor aprovado - João Silva
+REQ-002,true,Vendedor aprovado - Maria Santos
+REQ-003,false,Necessita revisão manual
+AP-12345,true,Aprovação automática configurada
+AP-12346,false,Cliente novo - revisar
+AR-98765,true,Renovação de contrato
