@@ -2,32 +2,53 @@
 """
 Script minimalista para automação de aprovações do Salesforce
 Monitora solicitações de aprovação e processa automaticamente com base em dados CSV
+
+IMPORTANTE: Este script requer uma sessão autenticada do Salesforce.
+Certifique-se de fazer login manualmente no Salesforce antes de executar o script,
+ou configure cookies de sessão para autenticação automática.
 """
 
 import csv
 import time
+import logging
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
 
 class SalesforceApprovalAutomation:
     """Classe para automação de aprovações no Salesforce"""
     
-    def __init__(self, csv_file='aprovacoes_permitidas.csv', headless=True):
+    def __init__(self, csv_file='aprovacoes_permitidas.csv', headless=True, log_file='aprovacoes.log'):
         """
         Inicializa o automator
         
         Args:
             csv_file: Caminho para o arquivo CSV com dados de aprovação
             headless: Se True, executa o navegador em modo headless
+            log_file: Arquivo para registrar as aprovações (audit trail)
         """
         self.csv_file = csv_file
+        self.log_file = log_file
+        self._configurar_logging()
         self.aprovacoes_permitidas = self._carregar_aprovacoes_csv()
         self.driver = self._inicializar_driver(headless)
+    
+    def _configurar_logging(self):
+        """Configura o sistema de logging para audit trail"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(self.log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
         
     def _inicializar_driver(self, headless):
         """Inicializa o Chrome WebDriver em modo headless"""
@@ -56,23 +77,43 @@ class SalesforceApprovalAutomation:
         try:
             with open(self.csv_file, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
-                for row in reader:
+                
+                # Valida colunas obrigatórias
+                colunas_obrigatorias = {'vendedor', 'comercio', 'aprovar'}
+                if not reader.fieldnames or not colunas_obrigatorias.issubset(set(reader.fieldnames)):
+                    raise ValueError(
+                        f"CSV deve conter as colunas: {', '.join(colunas_obrigatorias)}. "
+                        f"Encontradas: {', '.join(reader.fieldnames or [])}"
+                    )
+                
+                for row_num, row in enumerate(reader, start=2):  # start=2 pois linha 1 é header
                     vendedor = row.get('vendedor', '').strip().lower()
                     comercio = row.get('comercio', '').strip().lower()
                     status = row.get('aprovar', 'nao').strip().lower()
                     
+                    if not vendedor or not comercio:
+                        logging.warning(f"Linha {row_num}: vendedor ou comercio vazio, ignorando")
+                        continue
+                    
                     if status in ['sim', 'yes', 's', 'y', 'true', '1']:
                         chave = (vendedor, comercio)
                         aprovacoes[chave] = True
+                        logging.info(f"Aprovação configurada: {vendedor} - {comercio}")
                         
             print(f"✓ Carregadas {len(aprovacoes)} aprovações do arquivo {self.csv_file}")
             return aprovacoes
             
         except FileNotFoundError:
             print(f"⚠ Arquivo {self.csv_file} não encontrado. Usando lista vazia.")
+            logging.error(f"Arquivo CSV não encontrado: {self.csv_file}")
+            return {}
+        except ValueError as e:
+            print(f"✗ Erro de validação do CSV: {e}")
+            logging.error(f"Erro de validação do CSV: {e}")
             return {}
         except Exception as e:
             print(f"⚠ Erro ao carregar CSV: {e}")
+            logging.error(f"Erro ao carregar CSV: {e}")
             return {}
     
     def navegar_para_url(self, url):
@@ -165,9 +206,14 @@ class SalesforceApprovalAutomation:
                         }
                         solicitacoes.append(solicitacao)
                         print(f"  Solicitação {idx}: {vendedor} - {comercio}")
+                        logging.debug(f"Solicitação identificada: vendedor={vendedor}, comercio={comercio}")
                         
+                except (NoSuchElementException, WebDriverException) as e:
+                    logging.debug(f"Erro ao processar elemento {idx}: {e}")
+                    continue
                 except Exception as e:
-                    print(f"  Erro ao processar elemento {idx}: {e}")
+                    print(f"  Erro inesperado ao processar elemento {idx}: {e}")
+                    logging.error(f"Erro inesperado ao processar elemento {idx}: {e}")
                     continue
             
             print(f"\n✓ Total de {len(solicitacoes)} solicitações identificadas")
@@ -208,7 +254,7 @@ class SalesforceApprovalAutomation:
                         valor = campo.text.strip()
                         if valor:
                             return valor
-                    except:
+                    except (NoSuchElementException, WebDriverException):
                         continue
             
             # Se não encontrou por nome específico, tenta extrair das células
@@ -221,10 +267,10 @@ class SalesforceApprovalAutomation:
                         return celulas[0].text.strip()
                     if 'comercio' in possiveis_nomes[0].lower() and len(celulas) > 1:
                         return celulas[1].text.strip()
-            except:
+            except (NoSuchElementException, WebDriverException):
                 pass
                 
-        except Exception:
+        except (NoSuchElementException, WebDriverException):
             pass
         
         return None
@@ -249,9 +295,11 @@ class SalesforceApprovalAutomation:
             # Verifica se a aprovação é permitida
             if not self._verificar_aprovacao_permitida(vendedor, comercio):
                 print(f"  ✗ Aprovação não permitida (não está no CSV)")
+                logging.info(f"NEGADO: {vendedor} - {comercio} (não autorizado no CSV)")
                 return False
             
             print(f"  ✓ Aprovação permitida pelo CSV")
+            logging.info(f"PROCESSANDO: {vendedor} - {comercio}")
             
             # Procura pelo botão de aprovação
             botoes_possiveis = [
@@ -302,6 +350,7 @@ class SalesforceApprovalAutomation:
                     # Clica no botão
                     botao_encontrado.click()
                     print(f"  ✓ Clique no botão de aprovação executado")
+                    logging.info(f"CLIQUE: Botão de aprovação para {vendedor} - {comercio}")
                     
                     # Aguarda processamento
                     time.sleep(2)
@@ -318,22 +367,32 @@ class SalesforceApprovalAutomation:
                         )
                         botao_confirmar.click()
                         print(f"  ✓ Confirmação executada")
+                        logging.info(f"CONFIRMADO: {vendedor} - {comercio}")
                         time.sleep(2)
                     except TimeoutException:
                         print(f"  → Nenhum modal de confirmação detectado")
+                        logging.debug(f"Nenhum modal de confirmação para {vendedor} - {comercio}")
                     
                     print(f"  ✓ Aprovação concluída com sucesso!")
+                    logging.info(f"APROVADO: {vendedor} - {comercio} às {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     return True
                     
-                except Exception as e:
+                except (NoSuchElementException, TimeoutException, WebDriverException) as e:
                     print(f"  ✗ Erro ao clicar no botão: {e}")
+                    logging.error(f"Erro ao clicar no botão para {vendedor} - {comercio}: {e}")
                     return False
             else:
                 print(f"  ✗ Botão de aprovação não encontrado")
+                logging.warning(f"Botão não encontrado para {vendedor} - {comercio}")
                 return False
                 
-        except Exception as e:
+        except (NoSuchElementException, TimeoutException, WebDriverException) as e:
             print(f"  ✗ Erro ao processar aprovação: {e}")
+            logging.error(f"Erro ao processar aprovação de {vendedor} - {comercio}: {e}")
+            return False
+        except Exception as e:
+            print(f"  ✗ Erro inesperado ao processar aprovação: {e}")
+            logging.error(f"Erro inesperado ao processar aprovação de {vendedor} - {comercio}: {e}")
             return False
     
     def monitorar_e_processar(self, url, intervalo=30, max_iteracoes=None):
@@ -342,9 +401,14 @@ class SalesforceApprovalAutomation:
         
         Args:
             url: URL do Salesforce a ser monitorada
-            intervalo: Tempo em segundos entre verificações (padrão: 30s)
+            intervalo: Tempo em segundos entre verificações (padrão: 30s, mínimo: 5s)
             max_iteracoes: Número máximo de iterações (None = infinito)
         """
+        # Valida intervalo mínimo para evitar sobrecarga do servidor
+        if intervalo < 5:
+            print(f"⚠ Intervalo muito curto ({intervalo}s), ajustando para 5s")
+            intervalo = 5
+            logging.warning(f"Intervalo ajustado para {intervalo}s (mínimo recomendado)")
         self.navegar_para_url(url)
         
         iteracao = 0
@@ -377,8 +441,10 @@ class SalesforceApprovalAutomation:
                     print(f"\n{'='*60}")
                     print(f"Resultado: {aprovadas} de {len(solicitacoes)} aprovadas")
                     print(f"{'='*60}")
+                    logging.info(f"Iteração {iteracao}: {aprovadas}/{len(solicitacoes)} aprovadas")
                 else:
                     print("→ Nenhuma solicitação pendente encontrada")
+                    logging.debug(f"Iteração {iteracao}: Nenhuma solicitação encontrada")
                 
                 # Verifica se deve parar
                 if max_iteracoes and iteracao >= max_iteracoes:
@@ -391,10 +457,13 @@ class SalesforceApprovalAutomation:
                 
         except KeyboardInterrupt:
             print(f"\n\n⚠ Monitoramento interrompido pelo usuário")
+            logging.info("Monitoramento interrompido pelo usuário")
         except Exception as e:
             print(f"\n\n✗ Erro no monitoramento: {e}")
+            logging.error(f"Erro no monitoramento: {e}")
         finally:
             print(f"\nEncerrando...")
+            logging.info("Encerrando automação")
     
     def fechar(self):
         """Fecha o navegador"""
@@ -412,13 +481,16 @@ def main():
     HEADLESS = True  # Modo headless para Codespaces
     INTERVALO_SEGUNDOS = 30  # Intervalo entre verificações
     
-    # URL do Salesforce (ajustar conforme necessário)
-    # Exemplo: https://your-instance.salesforce.com/approval-page
-    SALESFORCE_URL = "https://your-salesforce-instance.lightning.force.com/lightning/o/ProcessInstanceWorkitem/list"
-    
-    # Se URL foi passada como argumento
+    # URL do Salesforce - deve ser fornecida como argumento
     if len(sys.argv) > 1:
         SALESFORCE_URL = sys.argv[1]
+    else:
+        print("✗ ERRO: URL do Salesforce é obrigatória!")
+        print("\nUso:")
+        print("  python salesforce_approval_automation.py <URL_DO_SALESFORCE>")
+        print("\nExemplo:")
+        print("  python salesforce_approval_automation.py 'https://your-instance.salesforce.com/lightning/o/ProcessInstanceWorkitem/list'")
+        sys.exit(1)
     
     print("="*60)
     print("SALESFORCE APPROVAL AUTOMATION")
